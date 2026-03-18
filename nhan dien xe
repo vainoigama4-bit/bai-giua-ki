@@ -13,7 +13,7 @@ from ultralytics import YOLO
 # ============================================================
 # ⚙️  CẤU HÌNH
 # ============================================================
-VIDEO_PATH  = "plate_test.mp4 b"
+VIDEO_PATH  = "plate_test.mp4"
 OUTPUT_PATH = "output_dem_xe.mp4"
 SHOW_WINDOW = True
 CONF        = 0.35
