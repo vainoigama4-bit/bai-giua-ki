@@ -1,0 +1,154 @@
+"""
+NHẬN DIỆN & ĐẾM XE CƠ - GIỮA KỲ (Phiên bản cải tiến)
+=======================================================
+Cải tiến:
+  - Cửa sổ phóng to toàn màn hình
+  - Dùng ByteTrack → giảm đứt tracking
+  - Bounding box không nhấp nháy (EMA smoothing)
+"""
+
+import cv2
+from ultralytics import YOLO
+
+# ============================================================
+# ⚙️  CẤU HÌNH
+# ============================================================
+VIDEO_PATH  = "mvideo.mp4"
+OUTPUT_PATH = "output_dem_xe.mp4"
+SHOW_WINDOW = True
+CONF        = 0.35
+
+# YOLO class IDs xe cộ (COCO)
+CAR_CLASSES = {
+    2: ("Car",       (0, 255, 0)),    # ← đổi màu ở đây (xanh lá)
+    3: ("Motorbike", (0, 0, 255)),    # đỏ
+    5: ("Bus",       (255, 0, 0)),    # xanh dương
+    7: ("Truck",     (0, 255, 255)),  # vàng
+}
+# ============================================================
+
+# Smooth box: lưu tọa độ trước đó của mỗi track_id
+smooth_boxes = {}
+SMOOTH_ALPHA = 0.4   # 0=rất mượt, 1=không smooth
+
+def get_smooth_box(tid, x1, y1, x2, y2):
+    if tid not in smooth_boxes:
+        smooth_boxes[tid] = (float(x1), float(y1), float(x2), float(y2))
+    else:
+        px1, py1, px2, py2 = smooth_boxes[tid]
+        x1 = SMOOTH_ALPHA * x1 + (1 - SMOOTH_ALPHA) * px1
+        y1 = SMOOTH_ALPHA * y1 + (1 - SMOOTH_ALPHA) * py1
+        x2 = SMOOTH_ALPHA * x2 + (1 - SMOOTH_ALPHA) * px2
+        y2 = SMOOTH_ALPHA * y2 + (1 - SMOOTH_ALPHA) * py2
+        smooth_boxes[tid] = (x1, y1, x2, y2)
+    return tuple(map(int, smooth_boxes[tid]))
+
+def draw_box(frame, x1, y1, x2, y2, label, color):
+    cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
+    (tw, th), _ = cv2.getTextSize(label, cv2.FONT_HERSHEY_SIMPLEX, 0.55, 1)
+    cv2.rectangle(frame, (x1, y1 - th - 8), (x1 + tw + 6, y1), color, -1)
+    cv2.putText(frame, label, (x1 + 3, y1 - 5),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
+
+def draw_ui(frame, count):
+    cv2.rectangle(frame, (0, 0), (420, 65), (15, 15, 15), -1)
+    cv2.rectangle(frame, (0, 0), (420, 65), (0, 200, 80), 2)
+    cv2.putText(frame, f"  Tong xe: {count}", (10, 46),
+                cv2.FONT_HERSHEY_SIMPLEX, 1.3, (0, 255, 100), 2, cv2.LINE_AA)
+
+def main():
+    print("[INFO] Đang tải model YOLO...")
+    model = YOLO("yolov8n.pt")
+    print("[INFO] Model sẵn sàng!")
+
+    cap = cv2.VideoCapture(VIDEO_PATH)
+    if not cap.isOpened():
+        print(f"[LỖI] Không mở được video: {VIDEO_PATH}")
+        return
+
+    fps    = cap.get(cv2.CAP_PROP_FPS)
+    width  = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    total  = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    print(f"[INFO] Video: {width}x{height}, {fps:.1f}fps, {total} frames")
+
+    fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+    out    = cv2.VideoWriter(OUTPUT_PATH, fourcc, fps, (width, height))
+
+    seen_ids   = set()
+    total_cars = 0
+    frame_idx  = 0
+
+    if SHOW_WINDOW:
+        cv2.namedWindow("Nhan dien xe - Nhan Q de thoat", cv2.WINDOW_NORMAL)
+        cv2.setWindowProperty("Nhan dien xe - Nhan Q de thoat",
+                              cv2.WND_PROP_FULLSCREEN, cv2.WINDOW_FULLSCREEN)
+
+    print("[INFO] Đang xử lý... (nhấn Q để dừng)")
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+        frame_idx += 1
+
+        results = model.track(
+            frame,
+            persist=True,
+            conf=CONF,
+            iou=0.45,
+            classes=list(CAR_CLASSES.keys()),
+            tracker="bytetrack.yaml",
+            verbose=False,
+        )
+
+        if results[0].boxes is not None:
+            for box in results[0].boxes:
+                cls_id   = int(box.cls[0])
+                name, color = CAR_CLASSES.get(cls_id, ("Vehicle", (100, 255, 100)))
+                track_id = int(box.id[0]) if box.id is not None else None
+
+                rx1, ry1, rx2, ry2 = map(int, box.xyxy[0])
+
+                # Smooth tọa độ box → không nhấp nháy
+                if track_id is not None:
+                    x1, y1, x2, y2 = get_smooth_box(track_id, rx1, ry1, rx2, ry2)
+                else:
+                    x1, y1, x2, y2 = rx1, ry1, rx2, ry2
+
+                cx = (x1 + x2) // 2
+                cy = (y1 + y2) // 2
+
+                if track_id is not None and track_id not in seen_ids:
+                    seen_ids.add(track_id)
+                    total_cars += 1
+
+                cv2.circle(frame, (cx, cy), 4, color, -1)
+                id_str = f" #{track_id}" if track_id is not None else ""
+                draw_box(frame, x1, y1, x2, y2, f"{name}{id_str}", color)
+
+        draw_ui(frame, total_cars)
+        out.write(frame)
+
+        if SHOW_WINDOW:
+            cv2.imshow("Nhan dien xe - Nhan Q de thoat", frame)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                print("[INFO] Dừng sớm.")
+                break
+
+        if frame_idx % 30 == 0:
+            pct = frame_idx / total * 100 if total > 0 else 0
+            print(f"  Frame {frame_idx}/{total} ({pct:.0f}%) | Xe đếm: {total_cars}")
+
+    cap.release()
+    out.release()
+    cv2.destroyAllWindows()
+
+    print("\n" + "=" * 45)
+    print(f"✅  HOÀN THÀNH!")
+    print(f"🚗  Tổng số xe đã đếm: {total_cars}")
+    print(f"📹  Video output: {OUTPUT_PATH}")
+    print("=" * 45)
+
+if __name__ == "__main__":
+    main()
